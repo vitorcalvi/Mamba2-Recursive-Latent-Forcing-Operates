@@ -91,6 +91,25 @@ class UnattendedPipeline:
 
     def phase0_audit_hardware(self) -> dict:
         self.log("\n--- Phase 0: Hardware & CUDA Audit ---")
+        
+        # Ensure critical dependencies are present
+        reqs = ["einops", "gymnasium", "popgym", "transformers"]
+        missing = []
+        for r in reqs:
+            try:
+                __import__(r)
+            except ImportError:
+                missing.append(r)
+
+        if missing:
+            self.log(f"Installing missing dependencies: {missing}...")
+            import subprocess
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", *missing],
+                check=True,
+            )
+            self.log("Dependencies installed successfully.")
+
         device_name = "CPU"
         vram_gb = 0.0
         cuda_ok = torch.cuda.is_available()
@@ -103,11 +122,22 @@ class UnattendedPipeline:
         else:
             self.log("CUDA not available. Running on CPU with fallback kernels.")
 
+        try:
+            from t2.world_model import MAMBA_AVAILABLE
+        except Exception:
+            MAMBA_AVAILABLE = False
+
+        if MAMBA_AVAILABLE:
+            self.log("Mamba SSM Dynamics Core: Compiled CUDA kernels active.")
+        else:
+            self.log("Mamba SSM Dynamics Core: Native Pure-PyTorch scan active (Safe & stable).")
+
         audit = {
             "cuda_available": cuda_ok,
             "device": device_name,
             "vram_gb": vram_gb,
             "pytorch_version": torch.__version__,
+            "mamba_ssm_compiled": MAMBA_AVAILABLE,
         }
         return audit
 
