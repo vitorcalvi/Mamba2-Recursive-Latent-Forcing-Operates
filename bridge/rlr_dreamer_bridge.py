@@ -73,19 +73,28 @@ class RLRDreamerBridge(nn.Module):
         for p in self.parameters():
             p.requires_grad = False
 
-    def forward(self, h_t: torch.Tensor) -> Tuple[torch.Tensor, int]:
+    def forward(
+        self, h_t: torch.Tensor, return_cost: bool = False
+    ) -> Tuple[torch.Tensor, int] | Tuple[torch.Tensor, int, torch.Tensor]:
         """Refine RSSM state h_t through recursive latent scratchpad.
 
         Parameters
         ----------
         h_t: [B, rssm_state_dim]
+        return_cost: bool
+            If True, also returns the differentiable ACT ponder cost.
 
         Returns
         -------
         augmented_h: [B, rssm_state_dim]
         n_loops_used: int
+        ponder_cost: torch.Tensor (only if return_cost=True)
         """
         if self._ablation_mode == "absent":
+            zero_cost = torch.zeros((), device=h_t.device)
+            self.last_ponder_cost = zero_cost
+            if return_cost:
+                return h_t, 0, zero_cost
             return h_t, 0
 
         B = h_t.shape[0]
@@ -94,18 +103,26 @@ class RLRDreamerBridge(nn.Module):
 
         cum_rho = torch.zeros(B, device=h_t.device)
         loops_used = 0
+        rho_history = []
 
         for loop_idx in range(self.max_loops):
             loops_used += 1
             h_loop = self.loop_cell(x, h_loop)
             rho = self.halting_head(h_loop)
+            rho_history.append(rho)
             cum_rho = cum_rho + rho
 
             if self.halting_head.should_halt(cum_rho):
                 break
 
+        ponder_cost = self.halting_head.compute_ponder_cost(rho_history)
+        self.last_ponder_cost = ponder_cost
+
         residual = self.out_proj(h_loop)
         out = self.norm(h_t + residual)
+
+        if return_cost:
+            return out, loops_used, ponder_cost
         return out, loops_used
 
 

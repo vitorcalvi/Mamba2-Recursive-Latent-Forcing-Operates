@@ -39,12 +39,12 @@ class GateG2:
         """Evaluate Gate G2 over the 3 benchmark tasks."""
         if fast_mode:
             # Fast verification pass with 2 tasks, 2 seeds
-            grid = DreamerEvalGrid(tasks=["Autoencode", "Battleship"], n_seeds=2, n_eval_episodes=2)
-            results = grid.run_grid()
+            grid = DreamerEvalGrid(tasks=["Autoencode", "Battleship"], n_seeds=2, n_train_episodes=3, n_eval_episodes=2)
+            results = grid.run_grid(fast_mode=True)
             passed, task_verdicts = grid.check_gate_g2(results)
             n_tasks_passed = sum(task_verdicts.values())
         else:
-            results = self.grid.run_grid()
+            results = self.grid.run_grid(fast_mode=False)
             passed, task_verdicts = self.grid.check_gate_g2(results)
             n_tasks_passed = sum(task_verdicts.values())
 

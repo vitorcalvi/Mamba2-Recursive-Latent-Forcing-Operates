@@ -84,6 +84,80 @@ class _SyntheticPOMDP:
         return self._last_obs.copy(), reward, terminated, truncated, info
 
 
+def _resolve_popgym_env_id(env_name: str) -> str:
+    import gymnasium as gym
+    registry = gym.envs.registry
+    if env_name in registry:
+        return env_name
+    clean = env_name.replace("popgym:", "").replace("popgym-", "").rstrip("-v0")
+    for suffix in ["Easy-v0", "-v0", "Medium-v0", "Hard-v0"]:
+        cand = f"popgym-{clean}{suffix}"
+        if cand in registry:
+            return cand
+    for k in registry.keys():
+        if "popgym" in k.lower() and clean.lower() in k.lower():
+            return k
+    raise ValueError(f"Unknown POPGym environment: {env_name}")
+
+
+def _compute_obs_dim(space: Any) -> int:
+    from gymnasium import spaces
+    if isinstance(space, spaces.Discrete):
+        return int(space.n)
+    elif isinstance(space, spaces.Tuple):
+        return sum(_compute_obs_dim(s) for s in space.spaces)
+    elif isinstance(space, spaces.MultiDiscrete):
+        return int(sum(space.nvec))
+    elif isinstance(space, spaces.Box):
+        return int(np.prod(space.shape))
+    return int(getattr(space, "n", 1))
+
+
+def _format_obs(obs: Any, space: Any) -> np.ndarray:
+    from gymnasium import spaces
+    if isinstance(space, spaces.Discrete):
+        v = np.zeros(space.n, dtype=np.float32)
+        v[int(obs)] = 1.0
+        return v
+    elif isinstance(space, spaces.Tuple):
+        return np.concatenate([_format_obs(o, s) for o, s in zip(obs, space.spaces)], axis=0)
+    elif isinstance(space, spaces.MultiDiscrete):
+        parts = []
+        for o, n in zip(obs, space.nvec):
+            v = np.zeros(n, dtype=np.float32)
+            v[int(o)] = 1.0
+            parts.append(v)
+        return np.concatenate(parts, axis=0)
+    elif isinstance(space, spaces.Box):
+        return np.asarray(obs, dtype=np.float32).reshape(-1)
+    return np.asarray(obs, dtype=np.float32).reshape(-1)
+
+
+def _compute_act_dim(space: Any) -> int:
+    from gymnasium import spaces
+    if isinstance(space, spaces.Discrete):
+        return int(space.n)
+    elif isinstance(space, spaces.MultiDiscrete):
+        return int(np.prod(space.nvec))
+    elif isinstance(space, spaces.Box):
+        return int(np.prod(space.shape))
+    return int(getattr(space, "n", 2))
+
+
+def _convert_action(action: int, space: Any) -> Any:
+    from gymnasium import spaces
+    if isinstance(space, spaces.Discrete):
+        return int(action)
+    elif isinstance(space, spaces.MultiDiscrete):
+        out = []
+        rem = int(action)
+        for dim in reversed(space.nvec):
+            out.append(rem % dim)
+            rem //= dim
+        return list(reversed(out))
+    return action
+
+
 # ---------------------------------------------------------------------------
 # Wrapper
 # ---------------------------------------------------------------------------
@@ -93,9 +167,8 @@ class POPGymWrapper:
     Parameters
     ----------
     env_name:
-        POPGym environment id (e.g. ``"Autoencode"``, ``"RepeatPreviousEasy"``).
-        Ignored when :mod:`popgym` is unavailable; the synthetic fallback is
-        used instead.
+        POPGym environment id (e.g. ``"Autoencode"``, ``"RepeatPrevious"``).
+        Resolves to correct gymnasium IDs like ``"popgym-RepeatPreviousEasy-v0"``.
     augment_obs:
         When ``True``, concatenate ``[reward_{t-1}, t / episode_len]`` to the
         observation per the MAMBA meta-RL observation design.
@@ -121,17 +194,28 @@ class POPGymWrapper:
             base_obs_dim = 4
             base_act_dim = 2
             self.is_discrete = True
+            self._fallback_reason = "popgym package not available"
         else:
-            # POPGym envs follow the gymnasium registry naming
-            # ``popgym:<EnvName>-v0``.
-            env_id = f"popgym:{env_name}-v0"
             try:
                 import gymnasium as gym  # type: ignore
 
-                self._env = gym.make(env_id)
+                real_id = _resolve_popgym_env_id(env_name)
+                self._env = gym.make(real_id)
+                self._real_env_id = real_id
+                obs_space = self._env.observation_space
+                act_space = self._env.action_space
+                base_obs_dim = _compute_obs_dim(obs_space)
+                base_act_dim = _compute_act_dim(act_space)
+                self.is_discrete = isinstance(act_space, (gym.spaces.Discrete, gym.spaces.MultiDiscrete))
+                self._fallback_reason = None
+                self._use_synthetic = False
             except Exception as exc:  # pragma: no cover
-                # POPGym imports OK but the requested env isn't registered.
-                # Fall back to synthetic so training can continue.
+                import warnings
+                warnings.warn(
+                    f"POPGymWrapper falling back to synthetic POMDP for '{env_name}': {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 self._use_synthetic = True
                 self._env = _SyntheticPOMDP(obs_dim=4,
                                             episode_len=episode_len,
@@ -140,14 +224,6 @@ class POPGymWrapper:
                 base_act_dim = 2
                 self.is_discrete = True
                 self._fallback_reason = str(exc)
-            else:
-                obs_space = self._env.observation_space
-                act_space = self._env.action_space
-                base_obs_dim = int(np.prod(obs_space.shape))
-                self.is_discrete = hasattr(act_space, "n")
-                base_act_dim = int(act_space.n) if self.is_discrete else int(
-                    np.prod(act_space.shape))
-                self._fallback_reason = None
 
         # ----- Cache dimensions ----------------------------------------
         self._base_obs_dim = base_obs_dim
@@ -186,10 +262,11 @@ class POPGymWrapper:
         """Reset the env and return the (optionally augmented) initial obs."""
         if self._use_synthetic:
             obs, info = self._env.reset(seed=seed)
+            self._obs = np.asarray(obs, dtype=np.float32).reshape(-1)
         else:
             kwargs = {} if seed is None else {"seed": seed}
             obs, info = self._env.reset(**kwargs)
-        self._obs = np.asarray(obs, dtype=np.float32).reshape(-1)
+            self._obs = _format_obs(obs, self._env.observation_space)
         self._prev_reward = 0.0
         self._t = 0
         return self._augment(self._obs, self._prev_reward, self._t,
@@ -201,10 +278,12 @@ class POPGymWrapper:
         if self._use_synthetic:
             obs, reward, terminated, truncated, info = self._env.step(
                 int(action))
+            self._obs = np.asarray(obs, dtype=np.float32).reshape(-1)
         else:
-            obs, reward, terminated, truncated, info = self._env.step(action)
+            real_act = _convert_action(action, self._env.action_space)
+            obs, reward, terminated, truncated, info = self._env.step(real_act)
             reward = float(reward)
-        self._obs = np.asarray(obs, dtype=np.float32).reshape(-1)
+            self._obs = _format_obs(obs, self._env.observation_space)
         self._t += 1
         # Stash reward for the next observation's augmentation slot.
         self._prev_reward = float(reward)

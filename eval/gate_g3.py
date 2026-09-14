@@ -45,11 +45,11 @@ class GateG3:
     def evaluate(self, fast_mode: bool = False) -> GateResult:
         """Run 3-arm ablation grid and check Gate G3 criteria."""
         if fast_mode:
-            evaluator = BridgeEvaluation(env_name=self.env_name, n_seeds=2, n_episodes=2)
-            results = evaluator.run_ablation_grid(loop_configs=[2], tau_configs=[0.01])
+            evaluator = BridgeEvaluation(env_name=self.env_name, n_seeds=2, n_train_episodes=3, n_eval_episodes=2)
+            results = evaluator.run_ablation_grid(loop_configs=[2], tau_configs=[0.01], fast_mode=True)
             passed, imp_pct, breakdown = evaluator.check_gate_g3(results, self.min_improvement_pct)
         else:
-            results = self.evaluator.run_ablation_grid(loop_configs=[1, 4, 8], tau_configs=[0.0, 0.01])
+            results = self.evaluator.run_ablation_grid(loop_configs=[1, 4, 8], tau_configs=[0.0, 0.01], fast_mode=False)
             passed, imp_pct, breakdown = self.evaluator.check_gate_g3(results, self.min_improvement_pct)
 
         c1 = imp_pct >= self.min_improvement_pct
