@@ -89,7 +89,7 @@ class GateG1:
         ood = probe_map.get("ood_hop_extrapolation")
 
         shuffle_deg = shuffler.score if shuffler else 1.0
-        conf_stdev = inspector.details.get("conf_stdev", 0.0) if inspector else 0.0
+        conf_stdev = inspector.details.get("avg_conf_stdev", inspector.details.get("conf_stdev", 0.0)) if inspector else 0.0
         removal_drop = ablator.score if ablator else 0.0
         ood_score = ood.score if ood else 0.0
 

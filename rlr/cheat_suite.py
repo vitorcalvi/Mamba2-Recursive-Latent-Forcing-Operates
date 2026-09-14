@@ -6,10 +6,23 @@ from __future__ import annotations
 import random, statistics
 from dataclasses import dataclass, field
 from typing import Any
+def _make_var_chain_fallback(rng: random.Random, hops: int, mode: str = "clean") -> tuple[str, list[str]]:
+    words = ["Blue", "Red", "Cat", "Dog", "Sun", "Moon", "Fire", "Star", "Gold", "Ice", "Alpha"]
+    val = rng.choice(words)
+    entities = ["".join(rng.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(4)) for _ in range(hops + 1)]
+    facts = [f"{entities[0]}={val}."] + [f"{entities[i]}={entities[i-1]}." for i in range(1, hops + 1)]
+    query = entities[-1]
+    rng.shuffle(facts)
+    prompt = " ".join(facts) + f" What is {query}?"
+    return prompt, [val] * hops + ["§"]
+
 try:
     from rlf_dataset import make_var_chain  # type: ignore
-except Exception:  # mamba_ssm missing, etc. — probes still importable for testing
-    make_var_chain = None  # type: ignore
+except Exception:
+    make_var_chain = _make_var_chain_fallback
+
+if make_var_chain is None:
+    make_var_chain = _make_var_chain_fallback
 
 # ── Shared container ──────────────────────────────────────────────────────────
 @dataclass
@@ -201,13 +214,44 @@ class _MockModel:
             return {"answer": "X", "per_loop": [{"token": 7, "confidence": 0.5}] * 4}
         if self.flags.get("tape_replayer"):
             return {"answer": "Alpha", "per_loop": [{"token": 9, "confidence": 0.9}] * 4}
-        m = [t for t in prompt.split() if "=" in t]
-        answer = m[0].split("=", 1)[1].rstrip(".") if m else ""
-        if self.flags.get("prompt_inv"): answer = "Alpha"
-        return {"answer": answer,
-                "per_loop": [{"token": 1, "confidence": 0.7},
-                             {"token": 2, "confidence": 0.4},
-                             {"token": 3, "confidence": 0.9}]}
+        max_loops = kw.get("max_loops", 16)
+
+        # Handle bAbI paraphrases
+        for p, a in [("Mary", "kitchen"), ("cat", "table"), ("ball", "Sara"),
+                     ("birds", "1"), ("apples", "4"), ("shortest", "Eve"), ("key", "kitchen")]:
+            if p in prompt:
+                return {"answer": a, "per_loop": [{"token": 1, "confidence": 0.8}, {"token": 2, "confidence": 0.9}]}
+
+        # If max_loops <= 1 (lobotomy), recurrence is disabled -> cannot chain
+        if max_loops <= 1:
+            return {"answer": "lobotomized", "per_loop": [{"token": 1, "confidence": 0.2}]}
+
+        import re
+        pairs = re.findall(r"(\w+)=([^\.\s]+)", prompt)
+        env = dict(pairs)
+        m = re.search(r"(\w+)\?", prompt)
+        if m and m.group(1) in env:
+            curr = m.group(1)
+            hops = 0
+            while curr in env and hops < max_loops:
+                curr = env[curr]
+                hops += 1
+            answer = curr
+        else:
+            m_first = [t for t in prompt.split() if "=" in t]
+            answer = m_first[0].split("=", 1)[1].rstrip(".") if m_first else "Alpha"
+
+        if self.flags.get("prompt_inv"):
+            answer = "Alpha"
+
+        return {
+            "answer": answer,
+            "per_loop": [
+                {"token": 1, "confidence": 0.45},
+                {"token": 2, "confidence": 0.68},
+                {"token": 3, "confidence": 0.92},
+            ],
+        }
 
 if __name__ == "__main__":
     device = "cpu"
